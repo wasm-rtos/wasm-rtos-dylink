@@ -10,7 +10,7 @@ if "$LD" --help 2>&1 | grep -- '--experimental-pic' >/dev/null; then pic+=(--exp
 "$CC" --target=wasm32 -nostdlib -fPIC -O0 -c library.c -o library.o
 "$LD" -m wasm32 ${pic[@]+"${pic[@]}"} --shared --no-entry --unresolved-symbols=import-dynamic \
     --export=library_add --export=library_name --export=library_fill --export=library_apply \
-    --export=library_increment --export=library_work -o library.so library.o
+    --export=library_increment --export=library_work --export=library_mark -o library.so library.o
 "$CC" --target=wasm32 -nostdlib -fPIC -O0 -c program.c -o program.o
 "$LD" -m wasm32 ${pic[@]+"${pic[@]}"} --pie --no-entry --export=app_main --export=app_name_char \
     --export=app_struct --export=app_callback --export=app_counter --export=app_work_only --export=app_saved --export=_start \
