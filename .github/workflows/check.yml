@@ -1,0 +1,38 @@
+name: Check
+
+# dylink.c builds with the interpreter's public header alone, with warnings
+# as errors, by clang and gcc; the test runs it alone and as the kernel's
+# loader, on the kernel and interpreter at their main.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: The kernel, its devices and its interpreter
+        run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/wasm-rtos/wasm-rtos "$RUNNER_TEMP/wasm-rtos"
+
+      - name: Build alone
+        run: |
+          for cc in clang gcc; do
+            $cc -std=c99 -O2 -Wall -Wextra -Werror -I"$RUNNER_TEMP/wasm-rtos/vm/source" -c dylink.c -o "$RUNNER_TEMP/dylink.o" || exit 1
+            echo "ok   $cc"
+          done
+
+      - name: Test
+        run: KERNEL="$RUNNER_TEMP/wasm-rtos" tools/check.sh
