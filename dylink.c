@@ -95,6 +95,9 @@ typedef struct Got
 struct Dylink
 {
     const DylinkOptions* options;
+    /* Kept from the options, for the modules find gave. */
+    void* context;
+    DylinkRelease release;
     Object* objects;
     uint32_t count;
     uint32_t capacity;
@@ -555,6 +558,15 @@ static WmResult add_object(State* s, const char* name, WmModule* module, int is_
     return parse_section(&o->meta, &section);
 }
 
+/* A module find gave: to the embedder's release, or freed. */
+static void give_back(State* s, WmModule* module)
+{
+    if (s->release)
+        s->release(s->context, module);
+    else
+        wm_module_free(module);
+}
+
 /* Every library the program needs, through the embedder's finder. A cycle is fine: symbols come later. */
 static WmResult collect(State* s, uint32_t index)
 {
@@ -580,7 +592,7 @@ static WmResult collect(State* s, uint32_t index)
             {
                 /* Not the process's yet unless it was added. */
                 if (s->count == 0 || s->objects[s->count - 1u].module != module)
-                    wm_module_free(module);
+                    give_back(s, module);
                 return result;
             }
         }
@@ -964,6 +976,11 @@ WmResult dylink_build(Dylink** out, WmModule* program, const DylinkOptions* opti
     if (!(s = (State*)allocate(sizeof(State))))
         return E_MEMORY;
     s->options = options;
+    if (options)
+    {
+        s->context = options->context;
+        s->release = options->release;
+    }
     *out = s;
     result = build(s, program);
     /* The options need not outlive the call. */
@@ -999,7 +1016,7 @@ void dylink_free(Dylink* s)
         release(o->name);
         release(o->bound);
         if (!o->is_main)
-            wm_module_free(o->module);
+            give_back(s, o->module);
     }
     release(s->objects);
     release(s->order);

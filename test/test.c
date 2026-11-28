@@ -28,6 +28,43 @@ static void check(int ok, const char* what)
     g_failures += !ok;
 }
 
+/* The interpreter's memory in use (wm_set_allocator), to see a library's module parsed or not (decision 2). */
+static size_t g_live;
+
+static void* counted(void* pointer, size_t size)
+{
+    size_t* header = pointer ? (size_t*)pointer - 2 : NULL;
+    size_t* moved;
+    if (header)
+        g_live -= header[0];
+    if (size == 0)
+    {
+        free(header);
+        return NULL;
+    }
+    if (!(moved = (size_t*)realloc(header, size + 2 * sizeof(size_t))))
+    {
+        if (header)
+            g_live += header[0];
+        return NULL;
+    }
+    moved[0] = size;
+    g_live += size;
+    return moved + 2;
+}
+
+/* What the library's parsed module takes. */
+static size_t module_bytes(void)
+{
+    size_t before = g_live, size;
+    WmModule* module = NULL;
+    if (wm_module_load(&module, g_library.bytes, g_library.size))
+        return 0;
+    size = g_live - before;
+    wm_module_free(module);
+    return size;
+}
+
 static int load(const char* path, Binary* out)
 {
     FILE* file = fopen(path, "rb");
@@ -75,7 +112,7 @@ static WmResult state_get(void* context, void* data, uint32_t size)
 }
 
 /* A page store in RAM: slots of one frame each. */
-#define SLOTS 64
+#define SLOTS 128
 static uint8_t g_slots[SLOTS][4096];
 
 static OsStatus slot_write(void* context, uint32_t slot, const void* frame)
@@ -245,6 +282,48 @@ static OsTaskHandle task_of(const Binary* app, const char* entry, const char* na
     return task;
 }
 
+/* What making a task of the program adds to the interpreter's memory. */
+static size_t task_cost(const Binary* app, const char* name, OsTaskHandle* out)
+{
+    size_t before = g_live;
+    *out = task_of(app, "app_counter", name);
+    return *out ? g_live - before : 0U;
+}
+
+/* Decision 2: a library's module is parsed once for every process linked with it, and goes with the last. What the second costs. */
+static size_t shared_module(const Binary* app, const char* what)
+{
+    OsTaskHandle warm, a, b, c;
+    size_t library = module_bytes(), base, first, second, again;
+    char line[160];
+    /* The kernel's own lasting things (host functions) made once, before anything is measured. */
+    if ((warm = task_of(app, "app_counter", "warm")) != NULL)
+        os_task_delete(warm);
+    wm_code_cache_trim(0U);
+    base = g_live;
+    first = task_cost(app, "first", &a);
+    second = task_cost(app, "second", &b);
+    snprintf(line, sizeof(line), "%s: the second task takes the first's module (%zu and %zu bytes; the module %zu, more once predecoded)",
+             what, first, second, library);
+    check(a && b && library > 0U && first >= second + library, line);
+    if (a)
+        os_task_delete(a);
+    check(b && os_task_get_state(b) != OS_TASK_DEAD && run_to_end(b) == 2U,
+          "the first freed, the module stays with the second, which runs to its end");
+    if (b)
+        os_task_delete(b);
+    wm_code_cache_trim(0U);
+    check(g_live == base, "the last freed, the module goes");
+    again = task_cost(app, "again", &c);
+    check(c && again == first, "the next task parses it again");
+    if (c)
+        os_task_delete(c);
+    return second;
+}
+
+/* What a task linked with a library already parsed costs, by bytes and from files: the same, none parses it. */
+static size_t g_second_by_bytes, g_second_mapped, g_second_read;
+
 /* A file system in RAM for decision 1: it maps its files or not, and counts what is opened and read whole. */
 typedef struct TestFile
 {
@@ -356,6 +435,10 @@ static void directory(const Binary* app)
     os_task_delete(b);
     check(run_to_end(task_of(app, "app_counter", "read-c")) == 2U && g_fs.whole_reads == 2U,
           "their processes freed, the copy went: the next one reads the file again");
+    g_fs.maps = 1;
+    g_second_mapped = shared_module(app, "a file of the directory, mapped");
+    g_fs.maps = 0;
+    g_second_read = shared_module(app, "a file of the directory, read into RAM");
 
     check(os_page_store_set(&store) == OS_STATUS_OK, "a page store");
     swapped = task_of(app, "app_saved", "swapped");
@@ -391,6 +474,28 @@ static void directory(const Binary* app)
     check(renamed && patched == NULL && g_fs.files[1].opens == 0U,
           "a needed name that is a path does not leave the directory");
 
+
+    /* Changed on the card while a process runs its library: the next one gets a module of the new contents. */
+    {
+        OsTaskHandle old = task_of(app, "app_counter", "old"), fresh = NULL;
+        uint32_t reads = g_fs.whole_reads;
+        if (changed)
+        {
+            g_fs.files[0].bytes = changed;
+            g_fs.files[0].size = g_library.size + (uint32_t)sizeof(custom);
+            fresh = task_of(app, "app_counter", "new");
+        }
+        check(old && fresh && g_fs.whole_reads == reads + 1U, "the file changed: the next process reads it, a new module");
+        check(old && fresh && run_to_end(old) == 2U && run_to_end(fresh) == 2U,
+              "the one before runs on with the module it had, the new one with its own");
+        g_fs.files[0].bytes = g_library.bytes;
+        g_fs.files[0].size = g_library.size;
+        if (old)
+            os_task_delete(old);
+        if (fresh)
+            os_task_delete(fresh);
+    }
+
     check(os_dylink_set_directory("/sd/none") == OS_STATUS_OK && task_of(app, "app_counter", "missing") == NULL,
           "no such file in the directory: the program does not load");
     os_dylink_set_directory(NULL);
@@ -423,6 +528,7 @@ static void kernel(const Binary* app)
     check(os_dylink_add_library("library.so", g_library.bytes, g_library.size) == OS_STATUS_OK &&
               os_dylink_add_library("library.so", g_library.bytes, g_library.size) == OS_STATUS_INVALID_ARGUMENT,
           "a library by its name; the same name again is refused");
+    g_second_by_bytes = shared_module(app, "added by bytes");
 
     first = task_of(app, "app_counter", "linked-a");
     second = task_of(app, "app_counter", "linked-b");
@@ -516,17 +622,33 @@ static void kernel(const Binary* app)
         OsPageStats stats;
         OsTaskHandle fresh, swapped;
         uint32_t whole, result;
+        size_t parsed;
         os_init();
         os_dylink_add();
-        check(os_page_store_set(&store) == OS_STATUS_OK, "a page store of 64 frames, 8 of them in RAM");
+        check(os_page_store_set(&store) == OS_STATUS_OK, "a page store of 128 frames, 8 of them in RAM");
         fresh = task_of(app, "app_saved", "fresh");
         whole = run_to_end(fresh);
+        {
+            /* What a task costs while no process holds the library's module. */
+            OsTaskHandle probe = NULL;
+            parsed = task_cost(app, "before", &probe);
+            if (probe)
+                os_task_delete(probe);
+        }
         swapped = task_of(app, "app_saved", "swapped");
         check(swapped && os_schedule() == OS_STATUS_OK && os_task_get_state(swapped) == OS_TASK_READY &&
                   os_task_swap_out(swapped) == OS_STATUS_OK && os_task_is_swapped(swapped),
               "a linked task stopped inside the library swapped out: its state and frames to the store");
         (void)os_page_get_stats(&stats);
         check(stats.stores > 0U, "its frames were written to the store");
+        {
+            /* Swapped out, its process is freed: it holds no module of the library (decision 2). */
+            OsTaskHandle probe = NULL;
+            size_t after = task_cost(app, "after", &probe);
+            check(probe && after == parsed, "the swapped-out task holds no module: the next task parses it as the first did");
+            if (probe)
+                os_task_delete(probe);
+        }
         result = swapped ? run_to_end(swapped) : 0U;
         check(whole == 2U && result == 2U && !os_task_is_swapped(swapped) &&
                   os_task_get_run_count(swapped) == os_task_get_run_count(fresh),
@@ -565,6 +687,7 @@ static void kernel(const Binary* app)
 int main(void)
 {
     Binary app;
+    wm_set_allocator(counted);
     if (!load("test/program.wasm", &app) || !load("test/library.so", &g_library))
     {
         printf("FAIL the test's program and library (test/build.sh)\n");
@@ -574,6 +697,8 @@ int main(void)
     directory(&app);
     kernel(&app);
     bytes_first(&app);
+    check(g_second_by_bytes > 0U && g_second_mapped == g_second_by_bytes && g_second_read == g_second_by_bytes,
+          "a second task costs the same with its library by bytes or from a file: neither parses it again");
     free(app.bytes);
     free(g_library.bytes);
     printf("%s\n", g_failures ? "FAILED" : "all passed");

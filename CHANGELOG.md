@@ -23,3 +23,9 @@
   place), read into RAM otherwise, one copy for the processes linked with
   the same contents, held until a process is freed (swapped out or
   ended). New libraries on the card need no new firmware.
+- **A library is parsed once, for every process linked with it**
+  (decision 2): a library added by bytes or a file of the directory keeps
+  one module while processes use it, freed with the last; a swapped-out
+  task holds none. On the interpreter alone, `DylinkOptions.release`
+  (the last field) takes back the modules `find` lent; without it the
+  process frees them, as before.
