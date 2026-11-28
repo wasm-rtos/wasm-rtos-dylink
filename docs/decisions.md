@@ -170,3 +170,107 @@ Sizes on a Cortex-M4 (`-Os`, sections the linker keeps): with no
 directory set, +128 bytes of code and +8 of RAM over the loader before
 (the process record, two pointers); with `os_dylink_set_directory`
 called, +554 bytes of code and +228 of RAM (the table of open files).
+
+## 2. A library is parsed once, for every process linked with it
+
+**Decided and built (2026-11-28).** Hole (a) of the list after the swap.
+
+### Problem
+
+Each process parses its own module of every library it links: `find`
+answers `wm_module_load` over the library's bytes each time, and
+`dylink_free` frees the module with the process. The bytes are shared
+(decision 1 for files; the caller's bytes for libraries added by bytes),
+the parsed module is not. Measured (64-bit): the test's library, 1261
+bytes, is 2032 bytes of module in each process; a program of the size of
+the tour (40 KB with `printf`) is 31 KB of module (wasm-rtos-vm decision
+7), and a library of that size would cost as much in every process
+linked with it. Kernel decision 9 stopped this for programs; libraries
+still pay it.
+
+### Decision
+
+**A library's module is loaded once and shared**, as kernel decision 9
+shares a program's.
+
+- **dylink.c**: `DylinkOptions` gains `release(context, module)`, its
+  last field (an initializer written before still builds), called by
+  `dylink_free` for each library's module instead of `wm_module_free`
+  (the instances go first, as now). `find`'s module is then lent, not
+  given. Without `release`, as now: the process owns what `find` gives.
+  `dylink_free` keeps the context it needs for it.
+- **os_dylink.c**: each library the loader knows (added by bytes, or an
+  open file of the directory) keeps its module and a count of the
+  processes using it; `find` loads it on the first and lends it after,
+  `release` frees it on the last. A swapped-out task holds none (its
+  process is freed, kernel decision 17); back from swap it takes the
+  module again, or loads it if nobody had it.
+- **The same file under two names** in one process (two needed names, one
+  contents): the second gets a module of its own, as two libraries did
+  before; one module cannot be two objects of a process.
+- **What stays per process**: instances, the memory and table, globals,
+  the GOT: everything `dylink_build` makes.
+- **Nothing in the interpreter or the kernel changes**: instances of one
+  module already share it (kernel decision 9).
+
+### Why
+
+- A module and its decoded code never change while instances use them;
+  the interpreter already lets instances of one module share it (kernel
+  decision 9 runs on that).
+- The library's code is the bulk of a process that links it; a second
+  process of the same program then costs its memory and state, not the
+  library again.
+
+### Instead
+
+- **Share in dylink.c itself** (a cache of modules by bytes): dylink.c
+  works on any host, and which bytes are the same library is the host's
+  knowledge (by name, by file contents).
+- **A module that counts its own users in the interpreter**: one more
+  rule in `wm.h` for what a counter in the loader does.
+- **Keep the module while no process uses it**: RAM for a library
+  nobody runs; it is parsed again when needed, as a program is.
+
+### Steps
+
+| # | What | Where | Status |
+|---|---|---|---|
+| 1 | `DylinkOptions.release`; `dylink_free` lends modules back | `dylink.c`, `dylink.h` | done |
+| 2 | Libraries by bytes and files of the directory keep a shared module with its count | `os_dylink.c` | done |
+| 3 | Test: two processes of the program, one module of the library; freed, it goes; swapped out, it goes and comes back; a file changed is a new module, the old one stays with its processes; dylink.c alone without `release` as before; each rule broken on purpose fails the test | `test/test.c` | done |
+| 4 | Boards: the heap of two linked tasks before and after (ESP32 with the card) | board tests (local) | done |
+| 5 | README, CHANGELOG | here | done |
+
+### Checks
+
+- `tools/check.sh`, 64 checks, each of the three builds. The test counts
+  the interpreter's memory (`wm_set_allocator`): a second task of the
+  program costs the library's module less than the first (1912 bytes on
+  a 64-bit computer, the module predecoded), by bytes, from a mapped file
+  and from a file read into RAM, and the three cost the same; the first
+  freed, the second runs on; the last freed, the memory is as before; a
+  task made while the only linked one is swapped out costs as the first
+  did; a file changed while a process runs gets a new module and both
+  run to their end. The test's page store grew to 128 frames: 64 did not
+  hold a second task beside one swapped out.
+- Each rule broken on purpose fails the test (10): `dylink_free` freeing
+  lent modules; `release` not called; a library parsed per process, by
+  bytes or from a file; a module never freed, by bytes or from a file;
+  a lent module freed by `release`, either kind; users not counted; the
+  loader passing no `release`.
+- Cortex-M4 (`-Os`, both objects whole): +34 bytes of code in `dylink.c`,
+  +256 in `os_dylink.c`; +160 bytes of RAM (a module and a count for each
+  of the 16 libraries, a module for each of the 8 files).
+- ESP32 with the card, the test's program and library from it, run twice
+  in a row, before and after: every check passes (16). The second linked
+  task takes 26676 bytes of heap, 28248 before (−1572, the library's
+  module); the first 29740 in both. Linked from the card in 70 ms (66),
+  back from swap in 58 ms (57). The free heap after shutdown is the same
+  after each run (250140): nothing leaks; 160 bytes less than before,
+  the loader's tables in RAM.
+- **Not with `OS_HAS_MEMORY_ACCOUNTING=1`**: the module is charged to the
+  task that parsed it, and freed after that task is gone the count is
+  written into freed memory (AddressSanitizer). The kernel's own shared
+  programs (kernel decision 9) do the same: two tasks spawned of one
+  program, the first deleted, then the second. A kernel matter, open.

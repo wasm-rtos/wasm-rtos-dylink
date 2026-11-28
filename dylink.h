@@ -23,8 +23,14 @@ extern "C" {
 
 typedef struct Dylink Dylink;
 
-/* Finds a library the program needs (a dylink.0 "needed" name), loaded; the process then owns it. */
+/*
+ * Finds a library the program needs (a dylink.0 "needed" name), loaded. The
+ * process then owns it, or, with a DylinkRelease, borrows it until it gives
+ * it back.
+ */
 typedef WmResult (*DylinkFind)(void* context, const char* name, WmModule** out);
+/* Takes back a module find gave, once the process's instances of it are freed. */
+typedef void (*DylinkRelease)(void* context, WmModule* module);
 
 typedef struct DylinkOptions
 {
@@ -47,6 +53,8 @@ typedef struct DylinkOptions
      * for a program that defines its memory.
      */
     WmMemory* memory;
+    /* NULL: the process frees the modules find gave (wm_module_free). */
+    DylinkRelease release;
 } DylinkOptions;
 
 /* Whether the module has a dylink.0 section. */

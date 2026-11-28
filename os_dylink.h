@@ -25,8 +25,9 @@ extern "C" {
 OsStatus os_dylink_add(void);
 /*
  * A shared library under the name programs list as needed. The name and the
- * bytes stay the caller's and must stay valid while programs use them; each
- * process parses its own module of them. A name given again is refused.
+ * bytes stay the caller's and must stay valid while programs use them; the
+ * module of them is parsed once and shared by the processes linked with it
+ * (decision 2), freed when the last of them is. A name given again is refused.
  */
 OsStatus os_dylink_add_library(const char* name, const uint8_t* bytes, uint32_t size);
 

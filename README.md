@@ -16,6 +16,10 @@ os_dylink_add_library("libui.so", ui_bytes, ui_size);   /* a library, by the nam
 os_task_create(&task, app_bytes, app_size, "main", "app", 0, OS_TASK_PRIORITY_NORMAL);
 ```
 
+A library is parsed once, for every process linked with it, and freed
+with the last of them (decision 2): a second task of the program costs
+its memory and state, not the library again.
+
 A build that does not call `os_dylink_add` has none of this: the linker
 leaves it out, as it leaves out a driver nobody registers.
 
@@ -30,9 +34,9 @@ os_task_spawn_path(&task, "/sd/apps/app.wasm", NULL, 0, 0, 0);
 A program needing `libui.so` links the file of that name in the
 directory, opened when it links, not before: mapped where the file
 system can (a library in flash runs in place), read into RAM otherwise.
-Processes linked with a file of the same contents share one copy; a
-process holds it until it is freed, so a swapped-out task holds none, and
-reads it again when it comes back. A file changed on the card meanwhile
+Processes linked with a file of the same contents share one copy and
+one parsed module of it; a process holds them until it is freed, so a
+swapped-out task holds none, and reads it again when it comes back. A file changed on the card meanwhile
 is not the one saved and is refused. A library added by bytes under the
 name is taken before the directory's file. A new `.so` on the card needs
 no line of firmware; a build that never sets a directory carries none of
@@ -62,6 +66,10 @@ WmInstance* app = dylink_instance(process);
 ...
 dylink_free(process);
 ```
+
+The process frees the modules `find_library` gave. A host that shares
+them sets `options.release`: `dylink_free` then gives each back to it,
+after its instances.
 
 ## Saving and swapping a linked program
 
