@@ -44,14 +44,20 @@ WmInstance* app = dylink_instance(process);
 dylink_free(process);
 ```
 
-## Saving a linked program
+## Saving and swapping a linked program
 
 The program's instance is saved with every instance linked to it (a call
 stopped inside a library, the shared memory, table and globals), and read
 back into a process built again from the same program and libraries:
 `os_task_save_snapshot`, `os_system_save` and deep sleep work for a linked
-task as for any. A library that is not the one saved is refused. Linked
-tasks do not swap out yet (`OS_STATUS_UNSUPPORTED`).
+task as for any. A library that is not the one saved is refused.
+
+A linked task swaps out as any (`os_task_swap_out`): its frames go to the
+page store and the rest of the process is freed; back from swap the
+program is built on its memory kept apart and the libraries are bound to
+it, with nothing written into it and nothing started again. A program
+built with `clang -pie` defines its memory and swaps; one that imports a
+memory dylink makes answers `OS_STATUS_UNSUPPORTED`.
 
 ## Building and checking
 

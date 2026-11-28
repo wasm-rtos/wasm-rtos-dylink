@@ -802,8 +802,16 @@ static WmTable* exported_table(const Object* o)
     return NULL;
 }
 
+/* Whether the module imports its memory. */
+static int imports_memory(const WmModule* module)
+{
+    WmExternType t;
+    return wm_module_memories(module, 0, &t) && t.module;
+}
+
 static WmResult build(State* s, WmModule* program)
 {
+    WmMemory* kept = s->options ? s->options->memory : NULL;
     uint32_t main_index;
     uint32_t memory_cursor = 0, table_cursor = 1;
     uint32_t min_pages = 0, max_pages = NONE, min_table = 1, max_table = NONE;
@@ -881,6 +889,9 @@ static WmResult build(State* s, WmModule* program)
     /* The program first: its memory and table, grown to fit everything, are the libraries'. */
     program_has_memory = wm_module_memories(program, 0, &program_memory) != 0;
     program_has_table = wm_module_tables(program, 0, &program_table) != 0;
+    /* Back from swap: the memory kept apart is the program's own, with its bytes. */
+    if (kept && (!program_has_memory || program_memory.module))
+        return E_UNSUPPORTED;
     if (program_has_memory && program_memory.module)
     {
         if (!(s->memory = wm_memory_new_paged(pages, max_pages, (uint8_t)page_log2)))
@@ -895,9 +906,16 @@ static WmResult build(State* s, WmModule* program)
     }
     main = &s->objects[main_index];
     s->current = main;
-    if ((result = wm_instantiate(&main->instance, program, NULL, resolve, s)))
+    if ((result = kept ? wm_instantiate_with_memory(&main->instance, program, kept, resolve, s)
+                       : wm_instantiate(&main->instance, program, NULL, resolve, s)))
         return result;
-    if (!s->memory && (s->memory = wm_instance_memory(main->instance)) != NULL)
+    if (kept)
+    {
+        /* Its start functions, relocations and constructors ran before it was kept: never again. */
+        s->memory = kept;
+        s->started = 1;
+    }
+    else if (!s->memory && (s->memory = wm_instance_memory(main->instance)) != NULL)
     {
         uint32_t size;
         (void)wm_memory_data(s->memory, &size);
@@ -924,7 +942,9 @@ static WmResult build(State* s, WmModule* program)
         if (o->is_main)
             continue;
         s->current = o;
-        if ((result = wm_instantiate(&o->instance, o->module, NULL, resolve, s)))
+        /* On a kept memory a library that imports it is bound to it, its data not written again. */
+        if ((result = kept && imports_memory(o->module) ? wm_instantiate_with_memory(&o->instance, o->module, kept, resolve, s)
+                                                       : wm_instantiate(&o->instance, o->module, NULL, resolve, s)))
             return result;
     }
 

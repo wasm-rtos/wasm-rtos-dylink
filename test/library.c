@@ -45,3 +45,11 @@ int library_work(int count)
         work += index & 1;
     return ++counter + (work == -1);
 }
+
+/* Data with a value of its own (in a data segment, not zeroed): written again by mistake, it would go back to 7. */
+static int marks = 7;
+
+int library_mark(void)
+{
+    return ++marks;
+}

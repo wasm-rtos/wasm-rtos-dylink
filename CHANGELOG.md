@@ -11,6 +11,9 @@
 - Built in two steps, as the interpreter instantiates: nothing runs while
   the process is built, its start functions, relocations and
   constructors run after. A linked task is saved, put to deep sleep and
-  read back as any; it does not swap out yet.
+  read back as any, and swaps out as any (kernel decision 17): back from
+  swap the program is built on its memory kept apart and the libraries
+  bound to it, nothing written into it, nothing started again
+  (`DylinkOptions.memory`).
 - A function import a library re-exports from the host is linked; it was
   left unresolved.

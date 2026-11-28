@@ -39,6 +39,14 @@ typedef struct DylinkOptions
     void* host_context;
     /* The stack in linear memory, after every module's data; 0 for 64 KiB. */
     uint32_t stack_size;
+    /*
+     * NULL, or the program's memory kept apart from an earlier process of
+     * the same program and libraries (back from swap): the program takes it
+     * and the libraries are bound to it, nothing written into it
+     * (wm_instantiate_with_memory); dylink_start is then not called. Only
+     * for a program that defines its memory.
+     */
+    WmMemory* memory;
 } DylinkOptions;
 
 /* Whether the module has a dylink.0 section. */

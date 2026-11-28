@@ -33,10 +33,9 @@ static WmResult build(void* context, WmModule* program, WmMemory* memory, WmReso
     (void)context;
     if (!dylink_is(program))
         return os_not_mine;
-    /* A memory kept apart is not taken yet: loaded tasks do not swap (os.h, Loaders). */
-    if (memory != NULL)
-        return "unsupported: a dylink.0 program on a kept memory";
     memset(&options, 0, sizeof(options));
+    /* Back from swap: built on the program's memory kept apart (kernel decision 17). */
+    options.memory = memory;
     options.find = find;
     options.host = host;
     options.host_context = host_context;

@@ -67,11 +67,14 @@ int app_work_only(void)
  * its counter at 1; then a call through the shared table into the program.
  */
 extern int library_work(int count);
+extern int library_mark(void);
 
 int app_saved(void)
 {
     library_increment();
-    return library_work(50000) + library_apply(double_value, 0) - 5;
+    library_mark(); /* 8 */
+    /* 9 if the library's data was kept; 8 if its data segment was written again, and the result 1 */
+    return library_work(50000) + library_apply(double_value, 0) - 5 + (library_mark() - 9);
 }
 
 /* The entry a spawned process starts at. */
