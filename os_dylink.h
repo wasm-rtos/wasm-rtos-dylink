@@ -30,6 +30,24 @@ OsStatus os_dylink_add(void);
  */
 OsStatus os_dylink_add_library(const char* name, const uint8_t* bytes, uint32_t size);
 
+#if OS_HAS_FS
+/* Library files open at once, shared by the processes linked with them. */
+#ifndef OS_DYLINK_MAX_FILES
+#define OS_DYLINK_MAX_FILES 8U
+#endif
+/*
+ * The directory of libraries (decision 1): a program, or a library, needing
+ * libui.so gets <path>/libui.so, unless a library was added by bytes under
+ * that name. The file is opened when a program links it, mapped where the
+ * file system can (run in place) and read into RAM otherwise; processes
+ * linked with a file of the same contents share it, each holds it until its
+ * process is freed (swapped out or ended). A needed name with '/' in it, "."
+ * or ".." is not opened. The path, absolute, stays the caller's; NULL forgets
+ * it; a new one is for programs linked after.
+ */
+OsStatus os_dylink_set_directory(const char* path);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

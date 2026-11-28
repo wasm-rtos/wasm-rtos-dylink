@@ -17,3 +17,9 @@
   (`DylinkOptions.memory`).
 - A function import a library re-exports from the host is linked; it was
   left unresolved.
+- **Libraries from a directory of the file system** (decision 1):
+  `os_dylink_set_directory("/sd/lib")`, and a program needing `libui.so`
+  links `/sd/lib/libui.so`: mapped where the file system can (run in
+  place), read into RAM otherwise, one copy for the processes linked with
+  the same contents, held until a process is freed (swapped out or
+  ended). New libraries on the card need no new firmware.

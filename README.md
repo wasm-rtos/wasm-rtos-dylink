@@ -19,12 +19,31 @@ os_task_create(&task, app_bytes, app_size, "main", "app", 0, OS_TASK_PRIORITY_NO
 A build that does not call `os_dylink_add` has none of this: the linker
 leaves it out, as it leaves out a driver nobody registers.
 
+## Libraries on a card
+
+```c
+os_fs_mount("/sd", &sd_driver, &sd);
+os_dylink_set_directory("/sd/lib");                     /* libui.so is /sd/lib/libui.so */
+os_task_spawn_path(&task, "/sd/apps/app.wasm", NULL, 0, 0, 0);
+```
+
+A program needing `libui.so` links the file of that name in the
+directory, opened when it links, not before: mapped where the file
+system can (a library in flash runs in place), read into RAM otherwise.
+Processes linked with a file of the same contents share one copy; a
+process holds it until it is freed, so a swapped-out task holds none, and
+reads it again when it comes back. A file changed on the card meanwhile
+is not the one saved and is refused. A library added by bytes under the
+name is taken before the directory's file. A new `.so` on the card needs
+no line of firmware; a build that never sets a directory carries none of
+this (docs/decisions.md, decision 1).
+
 ## What it is made of
 
 | File | What it is |
 |---|---|
 | `dylink.c`, `dylink.h` | The convention on the interpreter's public `wm.h` alone: any host can use it |
-| `os_dylink.c`, `os_dylink.h` | The kernel's loader (`OsLoader`, wasm-rtos decision 16) and the libraries by name |
+| `os_dylink.c`, `os_dylink.h` | The kernel's loader (`OsLoader`, wasm-rtos decision 16), the libraries by name and from a directory |
 
 It is one way of making a program out of modules, joined to the kernel
 the way drivers are; another way is written the same way, on the same

@@ -7,6 +7,7 @@
  */
 #include "dylink.h"
 #include "os_dylink.h"
+#include "fs.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -244,6 +245,172 @@ static OsTaskHandle task_of(const Binary* app, const char* entry, const char* na
     return task;
 }
 
+/* A file system in RAM for decision 1: it maps its files or not, and counts what is opened and read whole. */
+typedef struct TestFile
+{
+    const char* name;
+    const uint8_t* bytes;
+    uint32_t size;
+    uint32_t opens;
+} TestFile;
+
+static struct
+{
+    TestFile files[2];
+    int maps;
+    uint32_t whole_reads;
+} g_fs;
+
+static TestFile* fs_file(const char* path)
+{
+    for (uint32_t i = 0; i < 2U; ++i)
+        if (g_fs.files[i].name && strcmp(g_fs.files[i].name, path) == 0)
+            return &g_fs.files[i];
+    return NULL;
+}
+
+static OsStatus fs_stat(void* context, const char* path, OsFsStat* out)
+{
+    TestFile* file = fs_file(path);
+    (void)context;
+    out->type = file ? OS_FS_TYPE_FILE : OS_FS_TYPE_DIRECTORY;
+    out->size = file ? file->size : 0U;
+    return file || path[0] == '\0' || strcmp(path, "lib") == 0 ? OS_STATUS_OK : OS_STATUS_FILE_NOT_FOUND;
+}
+
+static OsStatus fs_open(void* context, const char* path, void** out)
+{
+    TestFile* file = fs_file(path);
+    (void)context;
+    if (!file)
+        return OS_STATUS_FILE_NOT_FOUND;
+    ++file->opens;
+    *out = file;
+    return OS_STATUS_OK;
+}
+
+static OsStatus fs_read(void* context, void* handle, uint64_t offset, void* buffer, uint32_t length, uint32_t* out)
+{
+    TestFile* file = (TestFile*)handle;
+    (void)context;
+    *out = offset >= file->size ? 0U : (uint32_t)(file->size - offset < length ? file->size - offset : length);
+    memcpy(buffer, file->bytes + offset, *out);
+    g_fs.whole_reads += offset == 0U && *out == file->size;
+    return OS_STATUS_OK;
+}
+
+static void fs_close(void* context, void* handle) { (void)context, (void)handle; }
+
+static OsStatus fs_read_dir(void* context, const char* path, uint32_t index, OsFsDirEntry* out)
+{
+    (void)context, (void)path, (void)index, (void)out;
+    return OS_STATUS_END_OF_DIRECTORY;
+}
+
+static const uint8_t* fs_map(void* context, void* handle, uint64_t* out_size)
+{
+    TestFile* file = (TestFile*)handle;
+    (void)context;
+    *out_size = file->size;
+    return g_fs.maps ? file->bytes : NULL;
+}
+
+static const OsFsDriver g_fs_driver = {fs_stat, fs_open, fs_read, fs_close, fs_read_dir, fs_map};
+
+static void with_card(void)
+{
+    os_init();
+    os_dylink_add();
+    os_fs_mount("/sd", &g_fs_driver, NULL);
+}
+
+/* Decision 1: libraries from a directory of the file system. */
+static void directory(const Binary* app)
+{
+    static const OsPageStore store = {NULL, SLOTS, 8U, slot_write, slot_read, NULL, NULL, NULL, NULL, NULL};
+    OsTaskHandle a, b, swapped, patched = NULL;
+    uint32_t before;
+    uint8_t* changed = (uint8_t*)malloc(g_library.size + 5U);
+    uint8_t* renamed = (uint8_t*)malloc(app->size);
+    static const uint8_t custom[5] = {0x00, 0x03, 0x01, 'x', 0x00};
+
+    memset(&g_fs, 0, sizeof(g_fs));
+    g_fs.files[0] = (TestFile){"lib/library.so", g_library.bytes, g_library.size, 0U};
+    g_fs.files[1] = (TestFile){"rary.so", g_library.bytes, g_library.size, 0U};
+    with_card();
+    check(os_dylink_set_directory("") == OS_STATUS_INVALID_ARGUMENT &&
+              os_dylink_set_directory("sd/lib") == OS_STATUS_INVALID_ARGUMENT &&
+              os_dylink_set_directory("/sd/lib") == OS_STATUS_OK && g_fs.files[0].opens == 0U,
+          "a directory of libraries, absolute; nothing opened when it is set");
+
+    g_fs.maps = 1;
+    check(run_to_end(task_of(app, "app_counter", "mapped")) == 2U && g_fs.files[0].opens > 0U && g_fs.whole_reads == 0U,
+          "a library from the directory where the file system maps it: run in place, nothing read");
+
+    g_fs.maps = 0;
+    a = task_of(app, "app_counter", "read-a");
+    b = task_of(app, "app_counter", "read-b");
+    check(a && b && g_fs.whole_reads == 1U, "where it cannot map, read into RAM once: two processes share the copy");
+    check(run_to_end(a) == 2U && run_to_end(b) == 2U, "both run, each with the library's data of its own");
+    os_task_delete(a);
+    os_task_delete(b);
+    check(run_to_end(task_of(app, "app_counter", "read-c")) == 2U && g_fs.whole_reads == 2U,
+          "their processes freed, the copy went: the next one reads the file again");
+
+    check(os_page_store_set(&store) == OS_STATUS_OK, "a page store");
+    swapped = task_of(app, "app_saved", "swapped");
+    before = g_fs.whole_reads;
+    check(swapped && os_schedule() == OS_STATUS_OK && os_task_swap_out(swapped) == OS_STATUS_OK,
+          "a task linked with the card's library stopped in its work and swapped out");
+    if (changed)
+    {
+        memcpy(changed, g_library.bytes, g_library.size);
+        memcpy(changed + g_library.size, custom, sizeof(custom));
+        g_fs.files[0].bytes = changed;
+        g_fs.files[0].size = g_library.size + (uint32_t)sizeof(custom);
+    }
+    check(swapped && os_task_swap_in(swapped) != OS_STATUS_OK && os_task_is_swapped(swapped) &&
+              g_fs.whole_reads == before + 1U,
+          "the file changed on the card while it was out: refused, the task stays swapped out with its state");
+    g_fs.files[0].bytes = g_library.bytes;
+    g_fs.files[0].size = g_library.size;
+    check(swapped && os_task_swap_in(swapped) == OS_STATUS_OK && g_fs.whole_reads == before + 2U &&
+              run_to_end(swapped) == 2U,
+          "the same file again: it comes back, its library read again (the copies went with the processes), and ends");
+
+    /* "library.so" made "../rary.so" in the program's dylink.0: /sd/lib/../rary.so is a file, and is not opened. */
+    for (uint32_t i = 0; renamed && i + 10U <= app->size; ++i)
+        if (memcmp(app->bytes + i, "library.so", 10U) == 0)
+        {
+            memcpy(renamed, app->bytes, app->size);
+            memcpy(renamed + i, "../rary.so", 10U);
+            os_task_create(&patched, renamed, app->size, "app_counter", "patched", 64U * 1024U,
+                           OS_TASK_PRIORITY_NORMAL);
+            break;
+        }
+    check(renamed && patched == NULL && g_fs.files[1].opens == 0U,
+          "a needed name that is a path does not leave the directory");
+
+    check(os_dylink_set_directory("/sd/none") == OS_STATUS_OK && task_of(app, "app_counter", "missing") == NULL,
+          "no such file in the directory: the program does not load");
+    os_dylink_set_directory(NULL);
+    os_shutdown();
+    free(changed);
+    free(renamed);
+}
+
+/* After kernel(): library.so is added by bytes, and taken before the directory's file. */
+static void bytes_first(const Binary* app)
+{
+    with_card();
+    g_fs.files[0].opens = 0U;
+    os_dylink_set_directory("/sd/lib");
+    check(run_to_end(task_of(app, "app_counter", "by-bytes")) == 2U && g_fs.files[0].opens == 0U,
+          "a library added by bytes is taken before the directory's file of that name");
+    os_dylink_set_directory(NULL);
+    os_shutdown();
+}
+
 /* As the kernel's loader. */
 static void kernel(const Binary* app)
 {
@@ -404,7 +571,9 @@ int main(void)
         return 1;
     }
     alone(&app);
+    directory(&app);
     kernel(&app);
+    bytes_first(&app);
     free(app.bytes);
     free(g_library.bytes);
     printf("%s\n", g_failures ? "FAILED" : "all passed");
